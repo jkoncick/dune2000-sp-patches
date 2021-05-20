@@ -72,11 +72,25 @@ void Mod__HandleEvent(EventData *event)
     case ET_SETCASH:
     {
       CSide *side = GetSide(event->side_id);
-      int actual_cash = side->SpiceReal + side->CashReal;
-      int target_drip = event->value;
-      if (actual_cash + side->CashDrip + target_drip < 0)
-           target_drip += (actual_cash + side->CashDrip + target_drip) * -1; 
-      side->CashDrip += target_drip;
+      int actual_cash = side->SpiceReal + side->SpiceDrip + side->CashReal + side->CashDrip;
+      int cost = actual_cash - event->value;
+      if ( cost > actual_cash )
+      {
+        cost = actual_cash; 
+      }
+      if (cost <= 0)
+      {
+        side->CashDrip -= cost;
+      }
+      else if ( side->SpiceDrip + side->SpiceReal <= cost )
+      {
+        side->CashDrip -= cost - (side->SpiceReal + side->SpiceDrip);
+        side->SpiceDrip = -side->SpiceReal;
+      }
+      else
+      {
+        side->SpiceDrip -= cost;
+      }
       break;
     }
     case ET_SETTECH:
@@ -103,7 +117,7 @@ void Mod__HandleEvent(EventData *event)
       if (event->amount == 0)
       {
         RevealMap();
-        Image__BlitClipTImage(RadarMap1, 0, 0, RadarMap2, 0, 0, 0);
+        BlitClipTImage1(_RadarMap1, 0, 0, _RadarMap2, 0, 0, 0);
       }
       else
         RevealCircle(event->xpos, event->ypos, event->amount);
@@ -140,7 +154,7 @@ void Mod__HandleEvent(EventData *event)
         unsigned char x = event->xpos;
         unsigned char y = event->ypos;
         FindNearestFreeTile(&x, &y, 12u);
-        Model__AddUnit(event->side_id, event->units[i], x, y, x, y, 0, 0);
+        ModelAddUnit(event->side_id, event->units[i], x, y, x, y, 0, 0);
       }
       break;
     }
