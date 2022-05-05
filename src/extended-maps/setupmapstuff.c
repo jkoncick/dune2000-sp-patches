@@ -39,7 +39,7 @@ void PlaceStaticCrateExt(uint8_t x, uint8_t y, eCrateType type, eCrateImage imag
       else if ((image & 6) == 6)
         gCrates[index].__timing = 1;
     }
-    tile->__tile_bitflags |= TileFlags_1000;
+    tile->__tile_bitflags |= TileFlags_1000_HAS_CRATE;
   }
 }
 
@@ -147,10 +147,16 @@ void Mod__setupmapstuff()
   // Store the original side ID upon starting a map
   gOldSideId = gSideId;
 
-  // Clean garbage data on val4 (base time) tor Timer and Interval concitions
+  // Clean garbage data for conditions which use some fields for internal data storage
   for (int i = 0; i < _gConditionCount; i++)
+  {
+    // Clean val4 (base time) for Timer and Interval conditions
     if (_gConditionArray[i].condition_type == CT_INTERVAL || _gConditionArray[i].condition_type == CT_TIMER)
       _gConditionArray[i].val4 = 0;
+    // Clean val3 (flag value) for Flag conditions
+    if (_gConditionArray[i].condition_type == CT_FLAG)
+      _gConditionArray[i].val3 = 0;
+  }
 
   // First pass - back up tile and special value, set up tile flags and preplaced spice/concrete
   for (int ypos = 0; ypos < gGameMap.height; ypos++)
@@ -282,11 +288,13 @@ void Mod__setupmapstuff()
             Unit *unit = GetUnit(side_id, unit_index);
             if (unit)
             {
-              unit->c_field_54_facingcurrent = direction;
-              unit->c_field_55_facingcurrent = direction;
-              unit->c_field_56_facingcurrent = direction;
+              unit->__Facing = direction;
+              unit->__FacingTurret = direction;
+              unit->__FacingTurretTarget = direction;
               if (special_value & 0x1000)
                 unit->Flags |= UFLAGS_10_STEALTH;
+              if (special_value & 0x2000)
+                unit->Tag = 1;
             }
             break;
           }
@@ -305,19 +313,22 @@ void Mod__setupmapstuff()
             bool no_new_harv = (special_value & 1024) != 0;
             bool primary = (special_value & 2048) != 0;
             int direction = ((special_value >> 10) & 3) << 3;
+            bool tagged = (special_value & 4096) != 0;
             if (building_type >= gBuildingTypeNum)
               DebugFatal("setupmapstuff.c", "Invalid building type %d at %d,%d (maximum is %d)", building_type, xpos, ypos, gBuildingTypeNum - 1);
             int building_index = ModelAddBuilding(side_id, building_type, xpos, ypos, true, no_new_harv, false);
+            Building *bld = GetBuilding(side_id, building_index);
             // Turret barrel direction
             if (_templates_buildattribs[building_type].__Behavior == BuildingBehavior_TURRET)
             {
-              Building *bld = GetBuilding(side_id, building_index);
               if (bld)
-                bld->c_field_21_facing = direction;
+                bld->__Facing = direction;
             }
             // Primary building
             else if (primary)
               SetBuildingAsPrimary(side_id, building_index);
+            if (tagged && bld)
+              bld->Tag = 1;
             break;
           }
           // Default behavior: Tiledata entry
@@ -558,7 +569,7 @@ LABEL_52:
       _FreeSpawnLocations[spawn_location] = 1;
       v119 = v79;
       x = v79;
-      FindNearestFreeTile(&x, &y, 6u);
+      GetNearestFreeTileForUnit(&x, &y, 6u);
       v80 = side;
       v81 = y;
       v82 = x;
@@ -663,7 +674,7 @@ LABEL_104:
 LABEL_105:
         x = v90;
         y = v108;
-        FindNearestFreeTile(&x, &y, 6u);
+        GetNearestFreeTileForUnit(&x, &y, 6u);
         ModelAddUnit(v80, type, x, y, x, y, 0, 0);
         goto LABEL_106;
       }

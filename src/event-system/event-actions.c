@@ -1,17 +1,20 @@
 #include <windows.h>
 #include <stdio.h>
+#include <stdint.h>
 #include "macros/patch.h"
 #include "dune2000.h"
 #include "patch.h"
 #include "ini.h"
 #include "utils.h"
+#include "event-utils.h"
 #include "event-actions.h"
 #include "event-core.h"
+#include "../extended-maps/crates-func.h"
 
-void EvAct_AddDelivery(int xpos, int ypos, int side_id, int amount, int deploy_action, eDeliveryType delivery_type, char *unit_list)
+void EvAct_AddDelivery(int xpos, int ypos, int side_id, int amount, int deploy_action, int delay, eDeliveryType delivery_type, char *unit_list)
 {
   CSide *side = GetSide(side_id);
-  if (delivery_type == DELIVERYTYPE_STARPORT && side->__primary_starport == -1)
+  if (delivery_type == DELIVERYTYPE_STARPORT && side->__PrimaryStarport == -1)
     return;
   int found_free_slot = 0;
   for (int i = 0; i <= 10; i++)
@@ -20,21 +23,23 @@ void EvAct_AddDelivery(int xpos, int ypos, int side_id, int amount, int deploy_a
     {
       DebugFatal("event-actions.c", "Too many deliveries");
     }
-    if (!side->delivery_field_262EC[i].__is_active)
+    if (!side->__Deliveries[i].__is_active)
     {
       found_free_slot = i;
       break;
     }
   }
-  side->delivery_field_262EC[found_free_slot].__is_active = 1;
-  side->delivery_field_262EC[found_free_slot].c_field_2 = 0;
-  side->delivery_field_262EC[found_free_slot].__xpos = xpos;
-  side->delivery_field_262EC[found_free_slot].__ypos = ypos;
-  side->delivery_field_262EC[found_free_slot].__delivery_time = gGameTicks;
-  side->delivery_field_262EC[found_free_slot].__deploy_action = deploy_action;
-  side->delivery_field_262EC[found_free_slot].__delivery_type = delivery_type;
-  memcpy(side->delivery_field_262EC[found_free_slot].__units, unit_list, amount);
-  side->delivery_field_262EC[found_free_slot].__units[amount] = -1;
+  side->__Deliveries[found_free_slot].__is_active = 1;
+  side->__Deliveries[found_free_slot].c_field_2 = 0;
+  side->__Deliveries[found_free_slot].__xpos = xpos;
+  side->__Deliveries[found_free_slot].__ypos = ypos;
+  side->__Deliveries[found_free_slot].__delivery_time = gGameTicks + delay;
+  side->__Deliveries[found_free_slot].__deploy_action = deploy_action;
+  side->__Deliveries[found_free_slot].__delivery_type = delivery_type;
+  memcpy(side->__Deliveries[found_free_slot].__units, unit_list, amount);
+  side->__Deliveries[found_free_slot].__units[amount] = -1;
+  if (delivery_type == DELIVERYTYPE_STARPORT)
+    side->__StarportDeliveryInProgress = 1;
 }
 
 void EvAct_SetDiplomacy(int source_side, int target_side, int allegiance_type, bool both_sided)
@@ -42,7 +47,7 @@ void EvAct_SetDiplomacy(int source_side, int target_side, int allegiance_type, b
   _gDiplomacy[source_side][target_side] = allegiance_type;
   if ( allegiance_type == 0 || allegiance_type == 2 )
   {
-    CSide__reset_enemy(GetSide(source_side), target_side);
+    CSide__ResetEnemyForSide(GetSide(source_side), target_side);
   }
   // Double-sided
   if (both_sided)
@@ -50,7 +55,7 @@ void EvAct_SetDiplomacy(int source_side, int target_side, int allegiance_type, b
     _gDiplomacy[target_side][source_side] = allegiance_type;
     if ( allegiance_type == 0 || allegiance_type == 2 )
     {
-      CSide__reset_enemy(GetSide(target_side), source_side);
+      CSide__ResetEnemyForSide(GetSide(target_side), source_side);
     }
   }
 }
@@ -63,22 +68,14 @@ void EvAct_PlaySound(int sample_id, bool point_sound, int xpos, int ypos)
     Sound__PlaySample(sample_id, 0, 0, 0);
 }
 
-void EvAct_SetCash(int side_id, eEventOperation operation, int value)
+void EvAct_SetCash(int side_id, eValueOperation operation, int value)
 {
   CSide *side = GetSide(side_id);
   int actual_cash = side->SpiceReal + side->SpiceDrip + side->CashReal + side->CashDrip;
-  int cost = 0;
-  switch (operation)
-  {
-    case EVENTOPERATION_SET:    cost = actual_cash - value; break;
-    case EVENTOPERATION_PLUS:   cost = value * -1; break;
-    case EVENTOPERATION_MINUS:  cost = value; break;
-  }
+  int target_cash = ValueOperation(actual_cash, value, operation);
+  int cost = actual_cash - target_cash;
 
-  if ( cost > actual_cash )
-  {
-    cost = actual_cash;
-  }
+  cost = HLIMIT(cost, actual_cash);
   if (cost <= 0)
   {
     side->CashDrip -= cost;
@@ -94,13 +91,13 @@ void EvAct_SetCash(int side_id, eEventOperation operation, int value)
   }
 }
 
-void EvAct_SetTech(int side_id, bool immediate_update, int value)
+void EvAct_SetTech(int side_id, eValueOperation operation, bool immediate_update, int value)
 {
-  _gMiscData.Tech[side_id] = value;
+  _gMiscData.Tech[side_id] = ValueOperation(_gMiscData.Tech[side_id], value, operation);
   // Immediately update available buildings and units
   if (immediate_update)
   {
-    CSide__update_list_of_available_buildings_and_units(GetSide(side_id));
+    CSide__UpdateBuildingAndUnitIconsAndBaseBoundaries(GetSide(side_id));
   }
 }
 
@@ -126,7 +123,7 @@ void EvAct_HideMap()
   {
     for (int x = 0; x < gGameMap.width; x++)
     {
-      gGameMap.map[x + _CellNumbersWidthSpan[y]].__shroud_flags = 1;
+      gGameMap.map[x + _CellNumbersWidthSpan[y]].__shroud = 1;
     }
   }
   _mapvisstate_548010 = GetMapVisState();
@@ -144,13 +141,17 @@ void EvAct_RevealMap(int xpos, int ypos, int radius)
     RevealCircle(xpos, ypos, radius);
 }
 
-void EvAct_ShowMessage(int duration, ShowMessageEventData *data)
+void EvAct_ShowMessage(eMsgSoundMode sound_mode, int duration, ShowMessageEventData *data)
 {
   // Play message sound
-  int sample_id = Data__GetSoundTableID("S_CHATMSG");
-  Sound__PlaySample(sample_id, 0, 0, 0);
+  switch (sound_mode)
+  {
+    case MSGSOUNDMODE_DEFAULT:  Sound__PlaySample(Data__GetSoundTableID("S_CHATMSG"), 0, 0, 0); break;
+    case MSGSOUNDMODE_NONE:     break;
+    case MSGSOUNDMODE_CUSTOM:   Sound__PlaySample(data->sample_id, 0, 0, 0); break;
+  }
   // Remember the current free message slot
-  int message_slot = _gMessageData.__slot;
+  int message_slot = _gMessageData.__next_slot;
   // Attempt to get custom text from mission ini file
   char mapIniPath[256];
   char id[12];
@@ -168,14 +169,23 @@ void EvAct_ShowMessage(int duration, ShowMessageEventData *data)
     _gMessageData.__ticks[message_slot] = gGameTicks + duration;
 }
 
-void EvAct_UnitSpawn(int xpos, int ypos, int side_id, int amount, char *unit_list)
+void EvAct_UnitSpawn(int xpos, int ypos, int side_id, int amount, int facing, int tag, char *unit_list)
 {
   for (int i = 0; i < amount; i++)
   {
     unsigned char x = xpos;
     unsigned char y = ypos;
-    FindNearestFreeTile(&x, &y, 12u);
-    ModelAddUnit(side_id, unit_list[i], x, y, x, y, 0, 0);
+    if (_templates_unitattribs[(int)unit_list[i]].__Behavior != UnitBehavior_SANDWORM)
+      GetNearestFreeTileForUnit(&x, &y, 12u);
+    int unit_index = ModelAddUnit(side_id, unit_list[i], x, y, x, y, 0, 0);
+    Unit *unit = GetUnit(side_id, unit_index);
+    if (unit)
+    {
+      unit->__Facing = facing << 2;
+      unit->__FacingTurret = facing << 2;
+      unit->__FacingTurretTarget = facing << 2;
+      unit->Tag = tag;
+    }
   }
 }
 
@@ -231,11 +241,11 @@ void EvAct_DamageTiles(int xpos, int ypos, int pixel_x, int pixel_y, int spread_
   }
 }
 
-int EvAct_AddUnit(int xpos, int ypos, int side_id, int properties, int unit_type, int movement, int facing)
+int EvAct_AddUnit(int xpos, int ypos, int side_id, int properties, int unit_type, int movement, int facing, int tag)
 {
   GameMapTileStruct *tile = &gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]];
   // Do not add unit if tile is already occupied by unit
-  if (tile->__tile_bitflags & TileFlags_8_OCC_UNIT)
+  if (_templates_unitattribs[unit_type].__Behavior != UnitBehavior_SANDWORM && tile->__tile_bitflags & TileFlags_8_OCC_UNIT)
     return -1;
   // Do not add next infantry if all 5 slots are already occupied
   if (_templates_unitattribs[unit_type].__IsInfantry && ((tile->__tile_bitflags & 0x3E0) == 0x3E0))
@@ -268,12 +278,13 @@ int EvAct_AddUnit(int xpos, int ypos, int side_id, int properties, int unit_type
   {
     if (!movement)
     {
-      unit->c_field_54_facingcurrent = facing << 2;
-      unit->c_field_55_facingcurrent = facing << 2;
-      unit->c_field_56_facingcurrent = facing << 2;
+      unit->__Facing = facing << 2;
+      unit->__FacingTurret = facing << 2;
+      unit->__FacingTurretTarget = facing << 2;
     }
     if (properties & 1)
       unit->Flags |= UFLAGS_10_STEALTH;
+    unit->Tag = tag;
   }
   // Revert back owner side attributes
   if (occ_building && (orig_owner_side != side_id))
@@ -281,7 +292,7 @@ int EvAct_AddUnit(int xpos, int ypos, int side_id, int properties, int unit_type
   return unit_index;
 }
 
-int EvAct_AddBuilding(int xpos, int ypos, int side_id, int properties, int building_type, int method, int facing)
+int EvAct_AddBuilding(int xpos, int ypos, int side_id, int properties, int building_type, int method, int facing, int tag)
 {
   bool initialsetup = false;
   bool captured = false;
@@ -303,16 +314,19 @@ int EvAct_AddBuilding(int xpos, int ypos, int side_id, int properties, int build
   if (place_concrete)
     ModelAddConcrete(side_id, CSide__MyVersionOfBuilding(GetSide(side_id), _templates_GroupIDs.Concrete1, 0), xpos, ypos, 0, _templates_buildattribs[building_type]._____TilesOccupiedAll);
   int building_index = ModelAddBuilding(side_id, building_type, xpos, ypos, initialsetup, captured, captured);
-  // Turret barrel direction
-  if (_templates_buildattribs[building_type].__Behavior == BuildingBehavior_TURRET)
+  // Set building properties
+  Building *bld = GetBuilding(side_id, building_index);
+  if (bld)
   {
-    Building *bld = GetBuilding(side_id, building_index);
-    if (bld)
-      bld->c_field_21_facing = facing << 2;
+    // Turret barrel direction
+    if (_templates_buildattribs[building_type].__Behavior == BuildingBehavior_TURRET)
+        bld->__Facing = facing << 2;
+    // Primary building
+    if (properties & 1)
+      SetBuildingAsPrimary(side_id, building_index);
+    // Building tag
+    bld->Tag = tag;
   }
-  // Primary building
-  else if (properties & 1)
-    SetBuildingAsPrimary(side_id, building_index);
   return building_index;
 }
 
@@ -343,7 +357,7 @@ void EvAct_AddExplosion(int xpos, int ypos, int pixel_x, int pixel_y, int spread
 int EvAct_AddCrate(int xpos, int ypos, int crate_type, int image, int ext_data, int respawns, int expiration)
 {
   // There is already crate
-  if (gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags & TileFlags_1000)
+  if (gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags & TileFlags_1000_HAS_CRATE)
     return -1;
   // Add the crate
   int index = GetFreeCrateIndex();
@@ -357,7 +371,7 @@ int EvAct_AddCrate(int xpos, int ypos, int crate_type, int image, int ext_data, 
     gCrates[index].__timing = (expiration?expiration:INT32_MAX);
     gCrates[index].__times_to_respawn = respawns;
     gCrates[index].ext_data_field = ext_data;
-    gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags |= TileFlags_1000;
+    gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags |= TileFlags_1000_HAS_CRATE;
   }
   return index;
 }
@@ -500,11 +514,17 @@ void EvAct_CenterViewport(int xpos, int ypos)
   _ViewportYPos = LIMIT(ypos * 32 - (_ViewportHeight / 2) + 16, 0, gGameMapHeight * 32 - _ViewportHeight);
 }
 
-void ChangeMapTile(int xpos, int ypos, int new_tile_index)
+void ChangeMapTile(int xpos, int ypos, int new_tile_index, eChangeTileMode mode)
 {
   if (new_tile_index == 65535)
     return;
   GameMapTileStruct *tile = &gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]];
+  switch (mode)
+  {
+    case CHANGETILE_NORMAL:   break;
+    case CHANGETILE_VISUAL:   tile->__tile_index = new_tile_index; return;
+    case CHANGETILE_RESTORE:  tile->__tile_index = tile->back_up_tile_index; return;
+  }
   uint16_t old_tile_index = tile->back_up_tile_index;
   // Determine properties of new tile
   bool no_drive_on =  (_TileBitflags[new_tile_index] & TileFlags_2000_DRIVE_ON) == 0;
@@ -525,7 +545,7 @@ void ChangeMapTile(int xpos, int ypos, int new_tile_index)
   bool real_building_on_tile = false;
   if ((tile->__tile_bitflags & TileFlags_10_OCC_BUILDING) && GetBuildingOnTile_0(xpos, ypos, &bld, &side_id, &index))
   {
-    if (destroy_buildings && !(_templates_buildattribs[bld->Type]._____Flags & BFLAGS_400000_NO_CONCRETE))
+    if (destroy_buildings && bld->__State != 17 && !(_templates_buildattribs[bld->Type]._____Flags & BFLAGS_400000_NO_CONCRETE))
       DestroyBuilding(side_id, index, 0);
     else
       real_building_on_tile = true;
@@ -574,14 +594,14 @@ void ChangeMapTile(int xpos, int ypos, int new_tile_index)
   tile->__damage = 0;
 };
 
-void EvAct_ChangeMapBlock(int xpos, int ypos, int width, int height, uint16_t *tiles)
+void EvAct_ChangeMapBlock(int xpos, int ypos, int width, int height, eChangeTileMode mode, uint16_t *tiles)
 {
   int tile_count = height * width;
   if (tile_count > 12)
     DebugFatal("event-actions.c", "Max allowed tiles in Change Tiles event is 12, actual is %d", tile_count);
   for (int y = 0; y < height; y++)
     for (int x = 0; x < width; x++)
-      ChangeMapTile(x + xpos, y + ypos, tiles[y * width + x]);
+      ChangeMapTile(x + xpos, y + ypos, tiles[y * width + x], mode);
   // Update spice visuals
   RECT r;
   r.left = LLIMIT(xpos - 1, 0);
@@ -591,62 +611,31 @@ void EvAct_ChangeMapBlock(int xpos, int ypos, int width, int height, uint16_t *t
   UpdateSpiceInRegion(&r);
 }
 
-void EvAct_TransformTiles(int amount, uint16_t *tiles)
+void EvAct_TransformTiles(int amount, eChangeTileMode mode, uint16_t *tiles)
 {
   if (amount > 6)
     DebugFatal("event-actions.c", "Max allowed tile pairs in Transform Tiles event is 6, actual is %d", amount);
   for (int y = 0; y < gGameMapHeight; y++)
     for (int x = 0; x < gGameMapWidth; x++)
       for (int i = 0; i < amount; i++)
-        if (gGameMap.map[x + _CellNumbersWidthSpan[y]].back_up_tile_index == tiles[i * 2])
-          ChangeMapTile(x, y, tiles[i * 2 + 1]);
+        if (gGameMap.map[x + _CellNumbersWidthSpan[y]].__tile_index == tiles[i * 2])
+        {
+          ChangeMapTile(x, y, tiles[i * 2 + 1], mode);
+          break;
+        }
 }
 
-void EvAct_ChangeTileAttributes(int xpos, int ypos, int width, int height, eEventOperation operation, uint32_t attributes)
+void EvAct_AddBuildingDestruct(int xpos, int ypos, int side_id, int building_type)
 {
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++)
-    {
-      GameMapTileStruct *tile = &gGameMap.map[x + xpos + _CellNumbersWidthSpan[y + ypos]];
-      TileFlags old_flags = tile->__tile_bitflags;
-      switch (operation)
-      {
-        case EVENTOPERATION_SET:    tile->__tile_bitflags = attributes; break;
-        case EVENTOPERATION_PLUS:   tile->__tile_bitflags |= attributes; break;
-        case EVENTOPERATION_MINUS:  tile->__tile_bitflags &= ~attributes; break;
-      }
-      TileFlags new_flags = tile->__tile_bitflags;
-      // Check if spice was removed
-      if ((old_flags & 0x700000) && !(new_flags & 0x700000))
-        tile->__tile_index = tile->back_up_tile_index;
-      // Check if concrete was removed
-      if ((old_flags & TileFlags_800_HAS_CONCRETE) && !(new_flags & TileFlags_800_HAS_CONCRETE))
-        tile->__tile_index = tile->back_up_tile_index;
-    }
-  // Update spice visuals
-  RECT r;
-  r.left = LLIMIT(xpos - 1, 0);
-  r.top = LLIMIT(ypos - 1, 0);
-  r.right = HLIMIT(xpos + width + 1, gGameMapWidth);
-  r.bottom = HLIMIT(ypos + height + 1, gGameMapHeight);
-  UpdateSpiceInRegion(&r);
-}
-
-void EvAct_ChangeTileDamage(int xpos, int ypos, int width, int height, eEventOperation operation, int value)
-{
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width; x++)
-    {
-      GameMapTileStruct *tile = &gGameMap.map[x + xpos + _CellNumbersWidthSpan[y + ypos]];
-      int damage = tile->__damage;
-      switch (operation)
-      {
-        case EVENTOPERATION_SET:    damage = value; break;
-        case EVENTOPERATION_PLUS:   damage += value; break;
-        case EVENTOPERATION_MINUS:  damage -= value; break;
-      }
-      tile->__damage = LIMIT(damage, 0, 255);
-    }
+  int old_screen_shakes = _ScreenShakes;
+  int building_index = ModelAddBuilding(side_id, building_type, xpos, ypos, 0, 1, 1);
+  DestroyBuilding(side_id, building_index, 0);
+  CSide *side = GetSide(side_id);
+  side->__BuildingsBuilt--;
+  side->__BuildingsBuiltPerType[building_type]--;
+  Building *bld = GetBuilding(side_id, building_index);
+  bld->__DeadStateTimeCounter = 1;
+  _ScreenShakes = old_screen_shakes;
 }
 
 void EvAct_ActivateTimer(int condition_index)
@@ -658,4 +647,495 @@ void EvAct_ActivateTimer(int condition_index)
   condition->arg1 = 0;
   // Set Base time to current time
   condition->val4 = gGameTicks;
+}
+
+void EvAct_TransferCredits(int side_id, eTransferCreditsOperation operation, int value)
+{
+  CSide *side = GetSide(side_id);
+  int remaining_transfer = 0;
+  switch (operation)
+  {
+  case TRANSFERCREDITS_ALL_TO_CASH: remaining_transfer = side->SpiceDrip + side->SpiceReal; break;
+  case TRANSFERCREDITS_ALL_TO_SPICE_STORAGE: remaining_transfer = side->__MaxStorage - (side->SpiceDrip + side->SpiceReal); break;
+  case TRANSFERCREDITS_ALL_TO_SPICE_FORCE: remaining_transfer = side->CashDrip + side->CashReal; break;
+  case TRANSFERCREDITS_VALUE_TO_CASH: remaining_transfer = value; break;
+  case TRANSFERCREDITS_VALUE_TO_SPICE_STORAGE: remaining_transfer = HLIMIT(side->__MaxStorage - (side->SpiceDrip + side->SpiceReal), value); break;
+  case TRANSFERCREDITS_VALUE_TO_SPICE_FORCE: remaining_transfer = value; break;
+  }
+
+  switch (operation)
+  {
+    case TRANSFERCREDITS_ALL_TO_CASH:
+    case TRANSFERCREDITS_VALUE_TO_CASH:
+    {
+      int transfer_spice_drip = HLIMIT(side->SpiceDrip, remaining_transfer);
+      remaining_transfer -= transfer_spice_drip;
+      side->CashDrip += transfer_spice_drip;
+      side->SpiceDrip -= transfer_spice_drip;
+      int transfer_spice_real = HLIMIT(side->SpiceReal, remaining_transfer);
+      side->CashReal += transfer_spice_real;
+      side->SpiceReal -= transfer_spice_real;
+      break;
+    }
+    case TRANSFERCREDITS_ALL_TO_SPICE_STORAGE:
+    case TRANSFERCREDITS_ALL_TO_SPICE_FORCE:
+    case TRANSFERCREDITS_VALUE_TO_SPICE_STORAGE:
+    case TRANSFERCREDITS_VALUE_TO_SPICE_FORCE:
+    {
+      int transfer_cash_drip = LIMIT(side->CashDrip, 0, remaining_transfer);
+      remaining_transfer -= transfer_cash_drip;
+      side->SpiceDrip += transfer_cash_drip;
+      side->CashDrip -= transfer_cash_drip;
+      int transfer_cash_real = HLIMIT(side->CashReal, remaining_transfer);
+      side->SpiceReal += transfer_cash_real;
+      side->SpiceReal = HLIMIT(side->SpiceReal, side->__MaxStorage);
+      side->CashReal -= transfer_cash_real;
+      break;
+    }
+  }
+}
+
+void EvAct_SetBuildingUpgrades(int side_id, int building_group, eValueOperation operation, int value)
+{
+  CSide *side = GetSide(side_id);
+  int old_upgrades = side->__BuildingGroupUpgradeCount[building_group];
+  int new_upgrades = LLIMIT(ValueOperation(old_upgrades, value, operation), 0);
+  side->__BuildingGroupUpgradeCount[building_group] = new_upgrades;
+  CSide__UpdateBuildingAndUnitIconsAndBaseBoundaries(side);
+  if ((old_upgrades < new_upgrades) && (side->__BuildingUpgradeQueue.__type == CSide__MyVersionOfBuilding(side, building_group, 0)))
+  {
+    side->__BuildingUpgradeQueue.__on_hold = 1;
+    GenerateUpgradeCancelOrder(side_id, side->__BuildingUpgradeQueue.__type);
+  }
+}
+
+void EvAct_SetStarportCost(int side_id, int unit_type, eValueOperation operation, bool default_cost, int value)
+{
+  CSide *side = GetSide(side_id);
+  if (default_cost)
+    side->__StarportUnitTypeCost[unit_type] = _templates_unitattribs[unit_type].__Cost;
+  else
+    side->__StarportUnitTypeCost[unit_type] = LLIMIT(ValueOperation(side->__StarportUnitTypeCost[unit_type], value, operation), 0);
+}
+
+void EvAct_ShowSideData(int side_id, int offset)
+{
+  CSide *side = GetSide(side_id);
+  char header[128];
+  memset(header, 0, sizeof(header));
+  sprintf(header, "Side %d (%p) Cash %d %d Spice %d %d Storage %d PowerOutput %d PowerDrain %d", side_id, (char *)side + offset, side->CashDrip, side->CashReal, side->SpiceDrip, side->SpiceReal, side->__MaxStorage, side->__PowerOutput, side->__PowerDrained);
+  ShowDataOnScreen(header, ((unsigned char *)side) + offset);
+}
+
+void EvAct_SetAIProperty(int side_id, eDataType data_type, eValueOperation operation, int offset, int value)
+{
+  CAI_ *ai = &_gAIArray[side_id];
+  SetDataValue((char *)ai, data_type, offset, operation, value);
+}
+
+void EvAct_ShowAIData(int side_id, int offset)
+{
+  CAI_ *ai = &_gAIArray[side_id];
+  char header[128];
+  memset(header, 0, sizeof(header));
+  sprintf(header, "AI %d (%p) memory dump at offset %d", side_id, (char *)ai + offset, offset);
+  ShowDataOnScreen(header, ((unsigned char *)ai) + offset);
+}
+
+void EvAct_SetMemoryData(eDataType data_type, eValueOperation operation, int address, int value)
+{
+  if (!address)
+    DebugFatal("event-actions.c", "Memory address is NULL");
+  SetDataValue((char *)address, data_type, 0, operation, value);
+}
+
+void EvAct_ShowMemoryData(int address)
+{
+  if (!address)
+    DebugFatal("event-actions.c", "Memory address is NULL");
+  char header[128];
+  memset(header, 0, sizeof(header));
+  sprintf(header, "Memory dump at address %08X", address);
+  ShowDataOnScreen(header, (unsigned char *)address);
+}
+
+void EvAct_DestroyUnit(int side_id, bool silent, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  if (unit->State == UNIT_STATE_17_DEAD)
+    return;
+  if (silent)
+  {  
+    unit->State = UNIT_STATE_17_DEAD;
+    unit->__DeadStateTimeCounter = 1;
+    unit->__AttackerIndex = -1;
+  }
+  else
+    DestroyUnit(side_id, unit_index);
+}
+
+void EvAct_DamageHealUnit(int side_id, int action, int units, int value, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  if (unit->State == UNIT_STATE_17_DEAD)
+    return;
+  UnitAtribStruct *unit_template = &_templates_unitattribs[unit->Type];
+  int hit_points = (units?((unit_template->__Strength * value) / 100):value) * (action?1:-1);
+  unit->Health = LIMIT(unit->Health + hit_points, 0, unit_template->__Strength);
+  if (!unit->Health)
+    DestroyUnit(side_id, unit_index);
+}
+
+void EvAct_ChangeUnitType(int side_id, int target_type, bool defined_type, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  if (defined_type)
+  {
+    if (_templates_unitattribs[unit->Type].UnitUpgradeAllowed)
+      target_type = _templates_unitattribs[unit->Type].UnitUpgradeTargetType;
+    else
+      return;
+  }
+  unit->Health = LLIMIT(unit->Health + _templates_unitattribs[target_type].__Strength - _templates_unitattribs[unit->Type].__Strength, 1);
+  unit->Flags = (unit->Flags & (~_templates_unitattribs[unit->Type].Flags)) | _templates_unitattribs[target_type].Flags;
+  unit->Speed = _templates_unitattribs[target_type].__Speed;
+  unit->Type = target_type;
+}
+
+void EvAct_SetUnitFlag(int side_id, eFlagOperation operation, int flag, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  unit->Flags = FlagOperation(unit->Flags, flag, operation);
+}
+
+void EvAct_SetUnitProperty(int side_id, eDataType data_type, int offset, eValueOperation operation, int value, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  SetDataValue((char *)unit, data_type, offset, operation, value);
+}
+
+void EvAct_SelectUnit(int side_id, bool exclude_from_restore, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  unit->__IsSelected = 1;
+  if (exclude_from_restore)
+    unit->PrevWasSelected = 0;
+}
+
+void EvAct_AirliftUnit(int side_id, int target_x, int target_y, bool units_target, int unit_index)
+{
+  CSide *side = GetSide(side_id);
+  Unit *unit = GetUnit(side_id, unit_index);
+  if (unit->State == UNIT_STATE_18_AWAITING_AIRLIFT)
+    return;
+  if (units_target && unit->TargetX == unit->BlockFromX && unit->TargetY == unit->BlockFromY)
+    return;
+  if (!units_target && target_x == unit->BlockFromX && target_y == unit->BlockFromY)
+    return;
+  int8_t queue_pos = CSide_46CCA0_get_queue_pos(side, unit);
+  if ( queue_pos != -1 )
+  {
+    if (! units_target)
+    {
+      unit->TargetX = target_x;
+      unit->TargetY = target_y;
+    }
+    if (unit->Flags & UFLAGS_BLOCKTOMARKED)
+    {
+      GameMapTileStruct *tile = &gGameMap.map[unit->BlockToX + _CellNumbersWidthSpan[unit->BlockToY]];
+      tile->__tile_bitflags &= ~TileFlags_8_OCC_UNIT;
+      if ( tile->__tile_bitflags & (TileFlags_200_CSPOT_TL|TileFlags_100_CSPOT_DL|TileFlags_80_CSPOT_DR|TileFlags_40_CSPOT_TR|TileFlags_20_CSPOT_MID) )
+      {
+        tile->__tile_bitflags &= ~(TileFlags_4_OWNER|TileFlags_2_OWNER|TileFlags_1_OWNER);
+        tile->__tile_bitflags |= ((tile->__tile_bitflags >> 25) & 7);
+      }
+      unit->Flags &= ~UFLAGS_BLOCKTOMARKED;
+      unit->BlockToX = unit->BlockFromX;
+      unit->BlockToY = unit->BlockFromY;
+      unit->__PosX = (unit->BlockFromX << 21) + (1 << 20);
+      unit->__PosY = (unit->BlockFromY << 21) + (1 << 20);
+      unit->__pos_stepsmax = 0;
+      unit->pos_steps = 0;
+    }
+    if ( CSide__AddToQueue(side, unit, unit_index, queue_pos, 100, unit->State) )
+    {
+      UnitAdjustState(unit, UNIT_STATE_18_AWAITING_AIRLIFT);
+    }
+  }
+}
+
+void EvAct_ShowUnitData(int side_id, int unit_index)
+{
+  Unit *unit = GetUnit(side_id, unit_index);
+  char buf[128];
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "Unit %d (%p) Type %d HP %d State %d Flags: ", unit_index, unit, unit->Type, unit->Health, unit->State);
+  int l = strlen(buf);
+  memset(&buf[l], ' ', 43);
+  for (int i = 0; i < 32; i++)
+    buf[l + i + (i / 8)] = ((unit->Flags >> i & 1)?'X':'o');
+  ShowDataOnScreen(buf, (unsigned char *)unit);
+}
+
+void EvAct_DestroyBuilding(int side_id, bool silent, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  if (bld->__State == UNIT_STATE_17_DEAD)
+    return;
+  if (silent)
+  {
+    bld->__State = UNIT_STATE_17_DEAD;
+    bld->__DeadStateTimeCounter = 1;
+    bld->__AttackerIndex = -1;
+  }
+  else
+    DestroyBuilding(side_id, building_index, 0);
+}
+
+void EvAct_DamageHealBuilding(int side_id, int action, int units, int value, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  if (bld->__State == UNIT_STATE_17_DEAD)
+    return;
+  BuildingAtrbStruct *bld_template = &_templates_buildattribs[bld->Type];
+  int hit_points = (units?((bld_template->_____HitPoints * value) / 100):value) * (action?1:-1);
+  bld->Health = LIMIT((int)bld->Health + hit_points, 0, bld_template->_____HitPoints);
+  if (!bld->Health)
+    DestroyBuilding(side_id, building_index, 0);
+}
+
+void EvAct_ChangeBuildingOwner(int side_id, int target_side, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  bld->Flags |= BFLAGS_1000000_INFILTRATED;
+  CaptureBuilding(side_id, target_side, building_index);
+}
+
+void EvAct_ChangeBuildingType(int side_id, int target_type, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  bld->Health = LLIMIT(bld->Health + _templates_buildattribs[target_type]._____HitPoints - _templates_buildattribs[bld->Type]._____HitPoints, 1);
+  bld->Flags = (bld->Flags & (~_templates_buildattribs[bld->Type]._____Flags)) | _templates_buildattribs[target_type]._____Flags;
+  bld->Type = target_type;
+}
+
+void EvAct_SetBuildingFlag(int side_id, eFlagOperation operation, int flag, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  bld->Flags = FlagOperation(bld->Flags, flag, operation);
+}
+
+void EvAct_SetBuildingProperty(int side_id, eDataType data_type, int offset, eValueOperation operation, int value, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  SetDataValue((char *)bld, data_type, offset, operation, value);
+}
+
+void EvAct_SelectBuilding(int side_id, bool exclude_from_restore, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  bld->__IsSelected = 1;
+  if (exclude_from_restore)
+    bld->PrevWasSelected = 0;
+}
+
+void EvAct_ShowBuildingData(int side_id, int building_index)
+{
+  Building *bld = GetBuilding(side_id, building_index);
+  char buf[128];
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "Building %d (%p) Type %d HP %d State %d Flags: ", building_index, bld, bld->Type, bld->Health, bld->__State);
+  int l = strlen(buf);
+  memset(&buf[l], ' ', 43);
+  for (int i = 0; i < 32; i++)
+    buf[l + i + (i / 8)] = ((bld->Flags >> i & 1)?'X':'o');
+  ShowDataOnScreen(buf, (unsigned char *)bld);
+}
+
+void EvAct_RemoveCrate(int crate_index)
+{
+  CrateStruct *crate = &gCrates[crate_index];
+  crate->__is_active = 0;
+  gGameMap.map[crate->__x + _CellNumbersWidthSpan[crate->__y]].__tile_bitflags &= ~TileFlags_1000_HAS_CRATE;
+}
+
+void EvAct_PickupCrate(int side_id, int crate_index)
+{
+  DoPickupCrate(crate_index, NULL, side_id);
+}
+
+void EvAct_SetCrateProperty(eDataType data_type, int offset, eValueOperation operation, int value, int crate_index)
+{
+  CrateStruct *crate = &gCrates[crate_index];
+  int old_x = crate->__x;
+  int old_y = crate->__y;
+  SetDataValue((char *)crate, data_type, offset, operation, value);
+  // Crate was moved around - fix attributes
+  if (old_x != crate->__x || old_y != crate->__y)
+  {
+    gGameMap.map[old_x + _CellNumbersWidthSpan[old_y]].__tile_bitflags &= ~TileFlags_1000_HAS_CRATE;
+    gGameMap.map[crate->__x + _CellNumbersWidthSpan[crate->__y]].__tile_bitflags |= TileFlags_1000_HAS_CRATE;
+  }
+}
+
+void EvAct_ShowCrateData(int crate_index)
+{
+  CrateStruct *crate = &gCrates[crate_index];
+  char buf[128];
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "Crate %d (%p) at %d , %d Type %d Image %d Ext data %d Respawns %d Timing: %d", crate_index, crate, crate->__x, crate->__y, crate->__type, crate->__image, crate->ext_data_field, crate->__times_to_respawn, crate->__timing);
+  for (int i = 3; i >= 0; i--)
+    QueueMessage("", -1);
+  QueueMessage(buf, -1);
+  for (int i = 0; i < 5; i++)
+    _gMessageData.__ticks[i] = gGameTicks;
+}
+
+void EvAct_ChangeTile(eChangeTileMode mode, int tile_index, int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  ChangeMapTile(xpos, ypos, tile_index, mode);
+}
+
+void EvAct_SetTileAttribute(eFlagOperation operation, int attribute, int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  GameMapTileStruct *tile = &gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]];
+  TileFlags old_flags = tile->__tile_bitflags;
+  tile->__tile_bitflags = FlagOperation(tile->__tile_bitflags, attribute, operation);
+  TileFlags new_flags = tile->__tile_bitflags;
+  // Check if spice was removed
+  if ((old_flags & 0x700000) && !(new_flags & 0x700000))
+    tile->__tile_index = tile->back_up_tile_index;
+  // Check if concrete was removed
+  if ((old_flags & TileFlags_800_HAS_CONCRETE) && !(new_flags & TileFlags_800_HAS_CONCRETE))
+    tile->__tile_index = tile->back_up_tile_index;
+  // Update spice visuals
+  if ((attribute >= 20) && (attribute <= 22))
+  {
+    RECT r;
+    r.left = LLIMIT(xpos - 1, 0);
+    r.top = LLIMIT(ypos - 1, 0);
+    r.right = HLIMIT(xpos + 2, gGameMapWidth);
+    r.bottom = HLIMIT(ypos + 2, gGameMapHeight);
+    UpdateSpiceInRegion(&r);
+  }
+}
+
+void EvAct_SetTileDamage(eValueOperation operation, int value, int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  GameMapTileStruct *tile = &gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]];
+  int damage = ValueOperation(tile->__damage, value, operation);
+  tile->__damage = LIMIT(damage, 0, 255);
+}
+
+void EvAct_RevealTile(int radius, int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  RevealCircle(xpos, ypos, radius);
+}
+
+void EvAct_HideTile(int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  if ( gBitsPerPixel == 16 )
+  {
+    int *img = _RadarMap1 + 16;
+    uint16_t *buffer = (uint16_t *)*img;
+    buffer[ypos * gGameMap.width + xpos] = 0;
+  }
+  else
+  {
+    int *img = _RadarMap1 + 16;
+    uint8_t *buffer = (uint8_t *)*img;
+    buffer[ypos * gGameMap.width + xpos] = 0;
+  }
+  for (int y = LLIMIT(ypos - 1, 0); y <= HLIMIT(ypos + 1, gGameMapHeight - 1); y++)
+    for (int x = LLIMIT(xpos - 1, 0); x <= HLIMIT(xpos + 1, gGameMapWidth - 1); x++)
+      gGameMap.map[x + _CellNumbersWidthSpan[y]].__shroud = 1;
+  RECT r;
+  r.left = xpos - 2;
+  r.top = ypos - 2;
+  r.right = xpos + 3;
+  r.bottom = ypos + 3;
+  UpdateShroudInRegion(&r, gGameMapWidth, gGameMapHeight);
+}
+
+void EvAct_ShowTileData(int cell_index)
+{
+  int xpos = cell_index & 255;
+  int ypos = cell_index >> 8;
+  GameMapTileStruct *tile = &gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]];
+  char buf[128];
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "Tile %d %d (%p) Idx %d Backup %d Shroud %d Damage %d Flags: ", xpos, ypos, tile, tile->__tile_index, tile->back_up_tile_index, tile->__shroud, tile->__damage);
+  int l = strlen(buf);
+  memset(&buf[l], ' ', 43);
+  for (int i = 0; i < 32; i++)
+    buf[l + i + (i / 8)] = ((tile->__tile_bitflags >> i & 1)?'X':'o');
+  for (int i = 3; i >= 0; i--)
+    QueueMessage("", -1);
+  QueueMessage(buf, -1);
+  for (int i = 0; i < 5; i++)
+    _gMessageData.__ticks[i] = gGameTicks;
+}
+
+void EvAct_OrderUnitRetreat(int side_id)
+{
+  CSide *side = GetSide(side_id);
+  uint8_t x, y;
+  if (CSide__FindBestBasePosition(side, &x, &y))
+    GenerateUnitRetreatOrder(side_id, x, y);
+}
+
+void EvAct_OrderBuildBuildingCancel(int side_id, bool force)
+{
+  CSide *side = GetSide(side_id);
+  if (force)
+    side->__BuildingBuildQueue.__on_hold = 1;
+  GenerateBuildBuildingCancelOrder(side_id, side->__BuildingBuildQueue.__type);
+}
+
+void EvAct_OrderBuildPlaceBuilding(int side_id, int xpos, int ypos)
+{
+  CSide *side = GetSide(side_id);
+  GenerateBuildPlaceBuildingOrder(side_id, side->__BuildingBuildQueue.__type, xpos, ypos);
+}
+
+void EvAct_OrderBuildUnitCancel(int side_id, bool any_unit, int unit_type, int queue, bool force)
+{
+  CSide *side = GetSide(side_id);
+  char *queue_groups = (char *)&_templates_GroupIDs;
+  for (int i = 0; i < 10; i++)
+  {
+    int unit_type_built = side->__UnitBuildQueue[i].__type;
+    int prereq1_group = _templates_unitattribs[unit_type_built].__PreReq1;
+    if ((!any_unit && unit_type_built == unit_type) || (any_unit && (queue == 0 || (queue > 0 && prereq1_group == queue_groups[(queue <= 6)?queue:queue+3]))))
+    {
+      if (force)
+        side->__UnitBuildQueue[i].__on_hold = 1;
+      GenerateBuildUnitCancelOrder(side_id, unit_type_built);
+    }
+  }
+}
+
+void EvAct_OrderStarportPick(int side_id, int unit_type)
+{
+  CSide *side = GetSide(side_id);
+  if (!side->__StarportDeliveryInProgress)
+    GenerateStarportPickOrder(side_id, unit_type);
+}
+
+void EvAct_OrderUpgradeCancel(int side_id, bool force)
+{
+  CSide *side = GetSide(side_id);
+  if (force)
+    side->__BuildingUpgradeQueue.__on_hold = 1;
+  GenerateUpgradeCancelOrder(side_id, side->__BuildingUpgradeQueue.__type);
 }

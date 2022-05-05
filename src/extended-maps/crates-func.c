@@ -5,8 +5,10 @@
 #include "patch.h"
 #include "ini.h"
 #include "utils.h"
+#include "../event-system/event-utils.h"
 #include "../event-system/event-core.h"
 #include "../event-system/event-actions.h"
+#include "crates-func.h"
 
 void HandleExplosionCrate(CrateStruct *crate, Unit *unit, unsigned char side_id);
 void HandleSpiceBloomCrate(CrateStruct *crate, int crate_type, Unit *unit, unsigned char side_id);
@@ -17,7 +19,7 @@ CALL(0x0041FB65, _Mod__GetCrateFromMap);
 
 unsigned char Mod__GetCrateFromMap(int xpos, int ypos)
 {
-  for (int i = 0; i < 30; i++)
+  for (int i = 0; i < MAX_CRATES; i++)
   {
     if (gCrates[i].__x == xpos && gCrates[i].__y == ypos && gCrates[i].__is_active)
     {
@@ -47,27 +49,34 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
     return 0;
   }
   // There is no crate on the target tile
-  if ( !(gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags & TileFlags_1000) )
+  if ( !(gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags & TileFlags_1000_HAS_CRATE) )
   {
     return 0;
   }
   // Find crate on a tile
-  CrateStruct *crate = NULL;
   int crate_index = -1;
-  for (int i = 0; i < 30; i++)
+  for (int i = 0; i < MAX_CRATES; i++)
   {
     if (gCrates[i].__x == xpos && gCrates[i].__y == ypos && gCrates[i].__is_active)
     {
-      crate = &gCrates[i];
       crate_index = i;
       break;
     }
   }
-  if (!crate)
+  if (crate_index == -1)
   {
     return 0;
   }
+  // Do the actual action
+  return DoPickupCrate(crate_index, unit, side_id);
+}
+
+bool DoPickupCrate(int crate_index, Unit *unit, unsigned char side_id)
+{
+  CrateStruct *crate = &gCrates[crate_index];
   int crate_type = crate->__type;
+  int xpos = crate->__x;
+  int ypos = crate->__y;
   // Guard against "Tile already occupied with unit" error
   if (crate_type == CT_UNIT && gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags & TileFlags_8_OCC_UNIT)
   {
@@ -84,7 +93,7 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
     else
     {
       crate->__is_active = 0;
-      gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags &= ~TileFlags_1000;
+      gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags &= ~TileFlags_1000_HAS_CRATE;
     }
   }
   // Do crate action
@@ -95,13 +104,13 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
     {
       // Extended behavior: amount of cash = ext_data_field * 100;
       int crate_cash = crate->ext_data_field ? crate->ext_data_field * 100 : _gVariables.CrateCash;
-      CSide_add_cash_drip(side, crate_cash);
+      CSide__AddCash(side, crate_cash);
       if ( _templates_GroupIDs.EX_CASH != -1 )
       {
-        ModelAddExplosion(side_id, _templates_GroupIDs.EX_CASH, 32 * unit->BlockToX + 16, 32 * unit->BlockToY + 16, 0, 0, 0, 0, 0);
+        ModelAddExplosion(side_id, _templates_GroupIDs.EX_CASH, 32 * xpos + 16, 32 * ypos + 16, 0, 0, 0, 0, 0);
         if ( side_id == gSideId )
         {
-          PlaySoundAt(_templates_explosionattribs[(int)_templates_GroupIDs.EX_CASH].__Sound, unit->BlockToX, unit->BlockToY);
+          PlaySoundAt(_templates_explosionattribs[(int)_templates_GroupIDs.EX_CASH].__Sound, xpos, ypos);
         }
       }
       return 0;
@@ -118,7 +127,7 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
       // Y = Relative Y-offset (3-bit value, possible offsets: 0, 4, 8, 12, -16, -12, -8, -4)
       // R = Range (2-bit value, possible ranges: 4, 5, 6, 7)
       // Reveal all map (default behavior) if extension data is zero
-      
+
       // Extended behavior
       if (crate->ext_data_field)
       {
@@ -142,7 +151,7 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
       {
         if ( _templates_GroupIDs.EX_CrateReveal != -1 )
         {
-          ModelAddExplosion(side_id, _templates_GroupIDs.EX_CrateReveal, 32 * unit->BlockToX + 16, 32 * unit->BlockToY + 16, 0, 0, 0, 0, 0);
+          ModelAddExplosion(side_id, _templates_GroupIDs.EX_CrateReveal, 32 * xpos + 16, 32 * ypos + 16, 0, 0, 0, 0, 0);
           if (side_id == gSideId)
           {
             PlaySoundAt(_templates_explosionattribs[(int)_templates_GroupIDs.EX_CrateReveal].__Sound, xpos, ypos);
@@ -160,10 +169,10 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
     {
       if ( _templates_GroupIDs.EX_CrateNoMap != -1 )
       {
-        ModelAddExplosion(side_id, _templates_GroupIDs.EX_CrateNoMap, 32 * unit->BlockToX + 16, 32 * unit->BlockToY + 16, 0, 0, 0, 0, 0);
+        ModelAddExplosion(side_id, _templates_GroupIDs.EX_CrateNoMap, 32 * xpos + 16, 32 * ypos + 16, 0, 0, 0, 0, 0);
         if ( side_id == gSideId )
         {
-          PlaySoundAt(_templates_explosionattribs[(int)_templates_GroupIDs.EX_CrateNoMap].__Sound, unit->BlockToX, unit->BlockToY);
+          PlaySoundAt(_templates_explosionattribs[(int)_templates_GroupIDs.EX_CrateNoMap].__Sound, xpos, ypos);
         }
       }
       if ( side_id == gSideId )
@@ -179,7 +188,7 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
       // I = Infantry amount (0 = one infantry, 1 = five infantry)
       // U = Unit type (0-59)
       // Give random unit (default behavior) if extension data is zero
-      
+
       // Specific unit = extended behavior
       if (crate->ext_data_field)
       {
@@ -218,7 +227,7 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
             unit_type = GetRandomValue("C:\\MsDev\\Projects\\July2000\\code\\unit.cpp", 8939) % _templates_UnitTypeCount;
             unit_version = CSide__MyVersionOfUnit(side, unit_type, 0);
           }
-          while ( !_templates_unitattribs[unit_version].__IsInfantry );  
+          while ( !_templates_unitattribs[unit_version].__IsInfantry );
           ModelAddUnit(side_id, unit_version, xpos, ypos, xpos, ypos, 0, 0);
         }
       }
@@ -236,21 +245,21 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
       //     1 = Restore full health
       //     2 = Restore 50% health
       //     3 = Restore 25% health
-      //     4 = Change unit type: 
+      //     4 = Change unit type:
       //         The target type for specific unit type is specified in unit definition in templates.bin:
       //         byte 0xAB: UnitUpgradeAllowed (1 = yes, 0 = no)
       //         byte 0xAC: UnitUpgradeTargetType
-      //     5, 6, 7 = Unused (reserved)      
+      //     5, 6, 7 = Unused (reserved)
       // E = Range of effect (0 = only the unit picking up crate, 1/2/3 = units max. 1/2/3 tiles far from the crate)
       // Make units stealth in range of 2, always pickup (default behavior) if extension data is zero
-      
+
       // Values for the default behavior
       bool play_animation = true;
       bool always_pickup = true;
       int mode = 0;
       int range = 2;
       int explosion_id = _templates_GroupIDs.EX_CrateStealth;
-      
+
       // Extened behavior
       if (crate->ext_data_field)
       {
@@ -262,11 +271,11 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
         if (crate->ext_data_field & 32)
           DebugFatal("crates-func.c", "Unused bit in ext_data_field is set to 1", mode);
       }
-      
+
       bool crate_used = always_pickup;
-      
+
       // Do the action
-      for (Unit *u = GetSide(side_id)->_Units_8; u; u = u->Next)
+      for (Unit *u = GetSide(side_id)->__FirstUnitPtr; u; u = u->Next)
       {
         if ((range == 0 && u == unit) || ((range > 0) && (abs(u->BlockFromX - xpos) <= range) && (abs(u->BlockFromY - ypos) <= range)))
         {
@@ -276,13 +285,13 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
               // Make unit stealth
               if ( _templates_unitattribs[u->Type].__Behavior == UnitBehavior_SABOTEUR )
               {
-                u->__SpecialVal_S = -96;
+                u->__SpecialPurpose = -96;
                 crate_used = true;
               }
               else if ( !Unit_49F5F0(u) )
               {
                 u->Flags |= UFLAGS_10_STEALTH;
-                u->S_c_field_31 = 0;
+                u->__StealthUnCloakDelayCounter = 0;
                 crate_used = true;
               }
               break;
@@ -320,30 +329,30 @@ bool Mod__PickupCrate(Unit *unit, unsigned char side_id)
           }
         }
       }
-      
+
       // Play pickup animation and sound
       if (play_animation && crate_used && explosion_id != -1)
       {
-        ModelAddExplosion(side_id, explosion_id, 32 * unit->BlockToX + 16, 32 * unit->BlockToY + 16, 0, 0, 0, 0, 0);
+        ModelAddExplosion(side_id, explosion_id, 32 * xpos + 16, 32 * ypos + 16, 0, 0, 0, 0, 0);
         if ( side_id == gSideId )
         {
-          PlaySoundAt(_templates_explosionattribs[explosion_id].__Sound, unit->BlockToX, unit->BlockToY);
+          PlaySoundAt(_templates_explosionattribs[explosion_id].__Sound, xpos, ypos);
         }
       }
-      
+
       // Remove the crate here
       if (crate_used)
       {
         crate->__is_active = 0;
-        gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags &= ~TileFlags_1000;        
+        gGameMap.map[xpos + _CellNumbersWidthSpan[ypos]].__tile_bitflags &= ~TileFlags_1000_HAS_CRATE;
       }
-      
+
       return 0;
     }
     case CT_EXECUTE_EVENT:
     {
       // New crate type: execute event
-      ExecuteEvent(crate->ext_data_field);  
+      ExecuteEvent(crate->ext_data_field);
       return 0;
     }
     case CT_SPICE_BLOOM_SPAWNER:
@@ -376,7 +385,7 @@ void HitCrate(int crate_index)
   {
     // Remove crate
     crate->__is_active = 0;
-    gGameMap.map[crate->__x + _CellNumbersWidthSpan[crate->__y]].__tile_bitflags &= ~TileFlags_1000;
+    gGameMap.map[crate->__x + _CellNumbersWidthSpan[crate->__y]].__tile_bitflags &= ~TileFlags_1000_HAS_CRATE;
     // Do damage
     HandleExplosionCrate(crate, NULL, gSideId);
     return;
